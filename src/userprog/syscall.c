@@ -1,11 +1,20 @@
 #include "userprog/syscall.h"
 #include <stdio.h>
+#include <string.h>
 #include <syscall-nr.h>
+#include "userprog/process.h"
+#include "userprog/pagedir.h"
+#include "devices/input.h"
+#include "devices/shutdown.h"
+#include "filesys/directory.h"
+#include "filesys/filesys.h"
+#include "filesys/file.h"
 #include "threads/interrupt.h"
+#include "threads/malloc.h"
+#include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
-#include "list.h"
-#include "process.h"
+#include "vm/page.h"
 
 static void syscall_handler (struct intr_frame *);
 void* check_addr(const void*);
@@ -298,4 +307,147 @@ void close_all_files(struct list* files)
     }
 
 
+}
+
+
+/* Binds a mapping id to a region of memory and a file. */
+struct mapping
+{
+    struct list_elem elem;      /* List element. */
+    int handle;                 /* Mapping id. */
+    struct file *file;          /* File. */
+    uint8_t *base;              /* Start of memory mapping. */
+    size_t page_cnt;            /* Number of pages mapped. */
+};
+
+/* Returns the file descriptor associated with the given handle.
+   Terminates the process if HANDLE is not associated with a
+   memory mapping. */
+static struct mapping *
+lookup_mapping (int handle)
+{
+    struct thread *cur = thread_current ();
+    struct list_elem *e;
+
+    for (e = list_begin (&cur->mappings); e != list_end (&cur->mappings);
+         e = list_next (e))
+    {
+        struct mapping *m = list_entry (e, struct mapping, elem);
+        if (m->handle == handle)
+            return m;
+    }
+
+    thread_exit ();
+}
+
+/* Remove mapping M from the virtual address space,
+   writing back any pages that have changed. */
+static void
+unmap (struct mapping *m)
+{
+    /* Remove this mapping from the list of mappings for this process. */
+    list_remove(&m->elem);
+
+    /* For each page in the memory mapped file... */
+    for(int i = 0; i < m->page_cnt; i++)
+    {
+        /* ...determine whether or not the page is dirty (modified). If so, write that page back out to disk. */
+        if (pagedir_is_dirty(thread_current()->pagedir, ((const void *) ((m->base) + (PGSIZE * i)))))
+        {
+            lock_acquire (&fs_lock);
+            file_write_at(m->file, (const void *) (m->base + (PGSIZE * i)), (PGSIZE*(m->page_cnt)), (PGSIZE * i));
+            lock_release (&fs_lock);
+        }
+    }
+
+    /* Finally, deallocate all memory mapped pages (free up the process memory). */
+    for(int i = 0; i < m->page_cnt; i++)
+    {
+        page_deallocate((void *) ((m->base) + (PGSIZE * i)));
+    }
+}
+
+/* Mmap system call. */
+static int
+sys_mmap (int handle, void *addr)
+{
+    struct file_descriptor *fd = lookup_fd (handle);
+    struct mapping *m = malloc (sizeof *m);
+    size_t offset;
+    off_t length;
+
+    if (m == NULL || addr == NULL || pg_ofs (addr) != 0)
+        return -1;
+
+    m->handle = thread_current ()->next_handle++;
+    lock_acquire (&fs_lock);
+    m->file = file_reopen (fd->file);
+    lock_release (&fs_lock);
+    if (m->file == NULL)
+    {
+        free (m);
+        return -1;
+    }
+    m->base = addr;
+    m->page_cnt = 0;
+    list_push_front (&thread_current ()->mappings, &m->elem);
+
+    offset = 0;
+    lock_acquire (&fs_lock);
+    length = file_length (m->file);
+    lock_release (&fs_lock);
+    while (length > 0)
+    {
+        struct page *p = page_allocate ((uint8_t *) addr + offset, false);
+        if (p == NULL)
+        {
+            unmap (m);
+            return -1;
+        }
+        p->private = false;
+        p->file = m->file;
+        p->file_offset = offset;
+        p->file_bytes = length >= PGSIZE ? PGSIZE : length;
+        offset += p->file_bytes;
+        length -= p->file_bytes;
+        m->page_cnt++;
+    }
+
+    return m->handle;
+}
+
+/* Munmap system call. */
+static int
+sys_munmap (int mapping)
+{
+    /* Get the map corresponding to the given map id, and attempt to unmap. */
+    struct mapping *map = lookup_mapping(mapping);
+    unmap(map);
+    return 0;
+}
+
+/* On thread exit, close all open files and unmap all mappings. */
+void
+syscall_exit (void)
+{
+    struct thread *cur = thread_current ();
+    struct list_elem *e, *next;
+
+    for (e = list_begin (&cur->fds); e != list_end (&cur->fds); e = next)
+    {
+        struct file_descriptor *fd = list_entry (e, struct file_descriptor, elem);
+        next = list_next (e);
+        lock_acquire (&fs_lock);
+        file_close (fd->file);
+        lock_release (&fs_lock);
+        free (fd);
+    }
+
+    for (e = list_begin (&cur->mappings); e != list_end (&cur->mappings);
+         e = next)
+    {
+        struct mapping *m = list_entry (e, struct mapping, elem);
+        next = list_next (e);
+        unmap (m);
+    }
 }
