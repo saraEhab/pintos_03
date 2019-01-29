@@ -19,7 +19,7 @@
 static void syscall_handler (struct intr_frame *);
 void* check_addr(const void*);
 struct proc_file* list_search(struct list* files, int fd);
-
+static struct lock fs_lock;
 extern bool running;
 
 struct proc_file {
@@ -404,7 +404,7 @@ sys_mmap (int handle, void *addr)
             unmap (m);
             return -1;
         }
-        p->private = false;
+        p->write_back = false;
         p->file = m->file;
         p->file_offset = offset;
         p->file_bytes = length >= PGSIZE ? PGSIZE : length;
