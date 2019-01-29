@@ -309,7 +309,6 @@ void close_all_files(struct list* files)
 
 }
 
-
 /* Binds a mapping id to a region of memory and a file. */
 struct mapping
 {
@@ -371,7 +370,7 @@ unmap (struct mapping *m)
 static int
 sys_mmap (int handle, void *addr)
 {
-    struct file_descriptor *fd = lookup_fd (handle);
+    struct proc_file *fd = lookup_fd (handle);
     struct mapping *m = malloc (sizeof *m);
     size_t offset;
     off_t length;
@@ -381,7 +380,7 @@ sys_mmap (int handle, void *addr)
 
     m->handle = thread_current ()->next_handle++;
     lock_acquire (&fs_lock);
-    m->file = file_reopen (fd->file);
+    m->file = file_reopen (fd->ptr);
     lock_release (&fs_lock);
     if (m->file == NULL)
     {
@@ -435,10 +434,10 @@ syscall_exit (void)
 
     for (e = list_begin (&cur->fds); e != list_end (&cur->fds); e = next)
     {
-        struct file_descriptor *fd = list_entry (e, struct file_descriptor, elem);
+        struct proc_file *fd = list_entry (e, struct proc_file, elem);
         next = list_next (e);
         lock_acquire (&fs_lock);
-        file_close (fd->file);
+        file_close (fd->ptr);
         lock_release (&fs_lock);
         free (fd);
     }
@@ -451,3 +450,4 @@ syscall_exit (void)
         unmap (m);
     }
 }
+
