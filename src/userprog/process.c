@@ -28,6 +28,17 @@ static bool load(const char *cmdline, void (**eip)(void), void **esp);
 
 extern struct list all_list;
 
+/* Data structure shared between process_execute() in the
+   invoking thread and start_process() in the newly invoked
+   thread. */
+struct exec_info
+{
+    const char *file_name;              /* Program to load. */
+    struct semaphore load_done;         /* "Up"ed when loading complete. */
+    struct wait_status *wait_status;    /* Child process. */
+    bool success;                       /* Program successfully loaded? */
+};
+
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
@@ -467,6 +478,86 @@ load_segment(struct file *file, off_t ofs, uint8_t *upage,
         ofs += page_read_bytes;
         upage += PGSIZE;
     }
+    return true;
+}
+
+/* Reverse the order of the ARGC pointers to char in ARGV. */
+static void
+reverse (int argc, char **argv)
+{
+    for (; argc > 1; argc -= 2, argv++)
+    {
+        char *tmp = argv[0];
+        argv[0] = argv[argc - 1];
+        argv[argc - 1] = tmp;
+    }
+}
+
+/* Pushes the SIZE bytes in BUF onto the stack in KPAGE, whose
+   page-relative stack pointer is *OFS, and then adjusts *OFS
+   appropriately.  The bytes pushed are rounded to a 32-bit
+   boundary.
+   If successful, returns a pointer to the newly pushed object.
+   On failure, returns a null pointer. */
+static void *
+push (uint8_t *kpage, size_t *ofs, const void *buf, size_t size)
+{
+    size_t padsize = ROUND_UP (size, sizeof (uint32_t));
+    if (*ofs < padsize)
+        return NULL;
+
+    *ofs -= padsize;
+    memcpy (kpage + *ofs + (padsize - size), buf, size);
+    return kpage + *ofs + (padsize - size);
+}
+
+/* Sets up command line arguments in KPAGE, which will be mapped
+   to UPAGE in user space.  The command line arguments are taken
+   from CMD_LINE, separated by spaces.  Sets *ESP to the initial
+   stack pointer for the process. */
+static bool
+init_cmd_line (uint8_t *kpage, uint8_t *upage, const char *cmd_line,
+               void **esp)
+{
+    size_t ofs = PGSIZE;
+    char *const null = NULL;
+    char *cmd_line_copy;
+    char *karg, *saveptr;
+    int argc;
+    char **argv;
+
+    /* Push command line string. */
+    cmd_line_copy = push (kpage, &ofs, cmd_line, strlen (cmd_line) + 1);
+    if (cmd_line_copy == NULL)
+        return false;
+
+    if (push (kpage, &ofs, &null, sizeof null) == NULL)
+        return false;
+
+    /* Parse command line into arguments
+       and push them in reverse order. */
+    argc = 0;
+    for (karg = strtok_r (cmd_line_copy, " ", &saveptr); karg != NULL;
+         karg = strtok_r (NULL, " ", &saveptr))
+    {
+        void *uarg = upage + (karg - (char *) kpage);
+        if (push (kpage, &ofs, &uarg, sizeof uarg) == NULL)
+            return false;
+        argc++;
+    }
+
+    /* Reverse the order of the command line arguments. */
+    argv = (char **) (upage + ofs);
+    reverse (argc, (char **) (kpage + ofs));
+
+    /* Push argv, argc, "return address". */
+    if (push (kpage, &ofs, &argv, sizeof argv) == NULL
+        || push (kpage, &ofs, &argc, sizeof argc) == NULL
+        || push (kpage, &ofs, &null, sizeof null) == NULL)
+        return false;
+
+    /* Set initial stack pointer. */
+    *esp = upage + ofs;
     return true;
 }
 
