@@ -181,6 +181,20 @@ syscall_handler (struct intr_frame *f UNUSED)
             release_filesys_lock();
             break;
 
+        case SYS_MUNMAP:
+            check_addr(p+1);
+            acquire_filesys_lock();
+            f->eax = sys_munmap(*(p+1));
+            release_filesys_lock();
+            break;
+
+        case SYS_MMAP:
+            check_addr(p+5);
+            check_addr(*(p+4));
+            acquire_filesys_lock();
+            f->eax = sys_mmap(*(p+4),*(p+5));
+            release_filesys_lock();
+            break;
 
         default:
             printf("Default %d\n",*p);
@@ -308,6 +322,7 @@ void close_all_files(struct list* files)
 
 
 }
+
 
 /* Binds a mapping id to a region of memory and a file. */
 struct mapping
@@ -450,4 +465,3 @@ syscall_exit (void)
         unmap (m);
     }
 }
-
